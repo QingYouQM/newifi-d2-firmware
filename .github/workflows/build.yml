@@ -1,6 +1,14 @@
 name: Build Newifi D2 Firmware
 
 on:
+  # push 到 main 就自动编译：本机访问 github.com 不稳定，
+  # 尽量减少「必须打开网页点按钮」的环节，推上去就开跑。
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - '.gitignore'
+      - '.gitattributes'
   workflow_dispatch:
     inputs:
       branch:
