@@ -253,24 +253,102 @@ USB 3.0 的辐射谐波正好落在 2.4G 频段，插着硬盘时 2.4G 掉速在
 
 ## 八、装雷神加速器
 
-```bash
-# SSH 进路由器（或用 LuCI 里的终端）
-leigod-d2 space      # 先看空间够不够
-leigod-d2 install    # 调用官方新版脚本安装，装完自动回收 9MB
-leigod-d2 status     # 检查结果
+固件里**不含**雷神本体（9MB 闭源二进制），但运行环境（`kmod-tun`、`iptables-mod-tproxy`、
+`tc-full`、`ip-full`、UPnP）全部预置好了，装的时候不会卡在缺依赖上。
+安装动作是调用雷神官方的新版脚本，`leigod-d2` 只是给它加了空间回收和状态检查。
+
+### 前置条件
+
+- 路由器能上网（WAN 拨号成功）—— 安装要访问 `119.3.40.126`
+- overlay 至少 12MB 空闲
+
+### 第一步：进命令行
+
+**方式 A（推荐，不用配客户端）**：浏览器进 `192.168.1.1` → 菜单 **服务 → 终端**
+（ttyd 已内置；找不到菜单就直接访问 `http://192.168.1.1/cgi-bin/luci/admin/services/ttyd`）
+
+**方式 B**：Windows 自带 OpenSSH，PowerShell 里直接：
+
+```powershell
+ssh root@192.168.1.1
 ```
 
-装完：手机连 `NewifiD2`（确认连的是 5G）→ 打开雷神加速器 App → 硬件加速 → 添加设备 → 看到路由器插件即可绑定。
+> 首次进系统要先去 **系统 → 管理权** 设一个 root 密码，否则 SSH 会拒绝登录。
+> 用 ttyd 则不需要，因为已经登录了。
 
-**如果 install 失败：**
-- `overlay 空间不足` → 先做 extroot，或者改用奇游
-- 网络问题 → 固件里 curl 已内置，确认路由器本身能上网
+### 第二步：安装
 
-> 手动安装的等价命令（不用助手脚本时）：
-> ```bash
-> cd /tmp && sh -c "$(curl -fsSL http://119.3.40.126/router_plugin_new/plugin_install.sh)"
+```sh
+leigod-d2 space      # ① 先看空间
+leigod-d2 install    # ② 安装（要下载 9MB，慢的话等一两分钟）
+leigod-d2 status     # ③ 检查结果
+```
+
+输出大致长这样：
+
+```
+# ① space
+overlay 可用空间: 19 MB
+雷神占用估算:    10 MB (二进制 + xdb)
+                 18 MB (不做软链去重时)
+结论: 装得下，但需要执行 dedupe 回收副本空间。
+
+# ② install
+--- 开始调用官方安装脚本 ---
+（官方脚本自己打印安装过程）
+match mips -> mipsel                    ← 出现这行说明架构映射生效了
+download acc-gw.router.mipsel binary success
+--- 主程序已就位，执行空间回收 ---
+已用软链接替换升级副本，回收约 9 MB
+--- 安装完成 ---
+
+# ③ status
+雷神主程序: 已安装 (8.7M)
+升级副本  : 软链（已优化）
+配置文件  : /etc/config/accelerator 存在
+启动脚本  : /etc/init.d/acc 存在
+剩余空间  : 10 MB
+```
+
+### 第三步：手机绑定
+
+手机连 `NewifiD2`（确认是 5G）→ 打开雷神加速器 App → **硬件加速** → 添加设备 →
+能看到路由器插件，点绑定。绑定后在 App 里给游戏机/PC 分配加速即可。
+
+UPnP 固件里默认已开，App 靠它发现插件。
+
+### 确认它真的在跑
+
+```sh
+ps | grep acc-gw                          # 应该有进程
+/etc/init.d/acc status                    # 或 /etc/init.d/acc running
+iptables -t nat -S | grep -i -E "leigod|acc"   # 应该能看到规则
+logread | grep -i -E "acc|leigod" | tail    # 看日志
+```
+
+如果 `iptables` 里没有任何规则，说明加速没生效 —— 多半是 **flow offloading 被打开了**
+（固件默认关，但如果你手动开过，硬件 NAT 会绕过 iptables）。检查：
+
+```sh
+uci get firewall.@defaults[0].flow_offloading    # 应该是 0
+```
+
+### 装不上时
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `下载安装脚本失败` | 路由器没通外网 | 先确认 WAN 拨号成功，`ping 223.5.5.5` |
+| `安装失败：主程序未落地` | overlay 空间不足 | 看 `df -h /overlay`，不够就做 extroot |
+| 卡在 `download binary failed` | 架构映射没生效 | 只能走新版脚本（本脚本已固定用 `router_plugin_new`） |
+| App 找不到插件 | UPnP 没开 | `uci get upnpd.config.enabled` 应为 1 |
+| 装完空间只剩几 MB | 没做去重 | `leigod-d2 dedupe` |
+
+> 手动等价命令（不用助手时）：
+> ```sh
+> cd /tmp && curl -fsSL http://119.3.40.126/router_plugin_new/plugin_install.sh -o inst.sh && sh inst.sh
 > ```
-> 注意必须是 `router_plugin_new` 这个新路径，旧的 `router_plugin` 里没有 mipsel 文件。
+> 必须是 `router_plugin_new` 这个新路径 —— 旧的 `router_plugin` 目录里没有 mipsel 文件，
+> 而且旧版脚本缺少 `mips → mipsel` 的映射，这正是网上大量「装不上」帖子的根源。
 
 ### 备选：奇游
 
