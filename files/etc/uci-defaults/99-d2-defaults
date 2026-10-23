@@ -1,0 +1,98 @@
+#!/bin/sh
+# 首次启动 / 恢复出厂后自动执行一次，执行完本文件会被删除
+# 场景: 主路由模式 —— 拨号、DHCP、WiFi 全部由这台机器承担
+
+WIFI_SSID='NewifiD2'
+WIFI_KEY='12345678'
+
+# 2.4G 开关：1 = 启用（默认），0 = 彻底关闭，只保留 5G
+# 注意 MT7621 是纯 SoC，没有集成射频/基带，禁用 MT7603 的后果是
+# 【2.4G 直接消失】，并不存在"把 2.4G 交给 MT7621 处理"这种可能。
+# 关掉只在"确定没有任何只支持 2.4G 的设备、且不需要穿墙覆盖"时才有意义。
+ENABLE_2G='1'
+
+uci -q batch <<'EOF'
+set system.@system[0].hostname='NewifiD2'
+set system.@system[0].timezone='CST-8'
+set system.@system[0].zonename='Asia/Shanghai'
+
+set system.ntp.enabled='1'
+delete system.ntp.server
+add_list system.ntp.server='ntp.aliyun.com'
+add_list system.ntp.server='time1.cloud.tencent.com'
+add_list system.ntp.server='cn.pool.ntp.org'
+
+set luci.main.lang='zh_cn'
+
+set upnpd.config.enabled='1'
+set upnpd.config.enable_upnp='1'
+set upnpd.config.enable_natpmp='1'
+set upnpd.config.external_iface='wan'
+set upnpd.config.internal_iface='lan'
+
+commit system
+commit luci
+commit upnpd
+EOF
+
+# ---------------------------------------------------------------
+# MT7621 的 flow offloading 会绕过 iptables，
+# 与游戏加速器 / 透明代理冲突，必须关掉
+# ---------------------------------------------------------------
+uci -q set firewall.@defaults[0].flow_offloading='0'
+uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+uci -q commit firewall
+
+# ---------------------------------------------------------------
+# 无线：主路由模式下 WiFi 由本机提供
+#
+# 2.4G 与 5G 使用【同一个 SSID、同一套加密】，也就是常说的「双频合一」。
+# 注意这不等同于真正的 band steering：
+#   MT7621 外挂的是 MT7603(2.4G) + MT7612(5G) 两颗独立芯片，
+#   开源 mt76 驱动没有跨芯片的引导逻辑，选哪个频段完全由终端自己决定。
+#   现代手机/笔记本普遍优先 5G，只有老设备和智能家居会停在 2.4G。
+#
+# 想改回两个独立 SSID：把 add_wifi 里的 ssid 换成 "${WIFI_SSID}-${band}" 即可
+# ---------------------------------------------------------------
+add_wifi() {
+    local radio="$1"
+    local band="$2"
+    local id
+
+    uci set wireless."$radio".disabled='0'
+    uci set wireless."$radio".country='CN'
+    uci set wireless."$radio".channel='auto'
+    # MT7603 只到 HT，2.4G 用 20MHz 更稳；MT7612 支持 VHT80
+    case "$band" in
+        2g) uci set wireless."$radio".htmode='HT20' ;;
+        5g) uci set wireless."$radio".htmode='VHT80' ;;
+    esac
+
+    id=$(uci add wireless wifi-iface)
+    uci set wireless."$id".device="$radio"
+    uci set wireless."$id".network='lan'
+    uci set wireless."$id".mode='ap'
+    uci set wireless."$id".ssid="$WIFI_SSID"
+    uci set wireless."$id".encryption='psk2'
+    uci set wireless."$id".key="$WIFI_KEY"
+    uci set wireless."$id".disabled='0'
+    # 同名双频必须保证网络名与安全参数完全一致，否则终端会反复重连
+}
+
+# 清掉出厂自带的 wifi-iface，避免出现重复 SSID 或空配置
+while uci -q delete wireless.@wifi-iface[0]; do :; done
+
+for r in radio0 radio1; do
+    uci -q get wireless."$r" >/dev/null 2>&1 || continue
+    band=$(uci -q get wireless."$r".band)
+    if [ "$band" = "2g" ] && [ "$ENABLE_2G" != '1' ]; then
+        # 关掉 2.4G 射频：不生成 AP，同时把 radio 本身也标记为 disabled 省电
+        uci set wireless."$r".disabled='1'
+        continue
+    fi
+    add_wifi "$r" "$band"
+done
+
+uci -q commit wireless
+
+exit 0

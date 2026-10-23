@@ -1,0 +1,21 @@
+# 编译过程目录（本地编译时才会产生，只忽略【仓库根目录】下的）
+# 注意必须带前导斜杠：否则 files/usr/bin/ 也会被 bin/ 规则误伤
+/bin/
+/build_dir/
+/staging_dir/
+/tmp/
+/dl/
+/logs/
+/.config
+/.config.old
+/output/
+/openwrt/
+*.log
+
+# 系统垃圾
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 本地调试用（uci 模拟器等），不需要进仓库
+.workbuddy/

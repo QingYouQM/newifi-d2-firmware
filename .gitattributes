@@ -1,0 +1,7 @@
+# 强制 LF：OpenWrt 上的 shell 脚本如果带 CRLF，
+# 会报 "not found"（解释器路径尾部带了 \r），uci-defaults 直接失效。
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.config text eol=lf

@@ -1,0 +1,110 @@
+#!/bin/sh
+# wifi-band —— 按频段开关无线，不依赖 radio0/radio1 的编号
+#
+# 为什么不能直接写 radio0：Newifi D2 的 PCIe 顺序是
+#   pcie0 = MT7612EN (5G)  ->  radio0
+#   pcie1 = MT7603EN (2.4G) ->  radio1
+# 和你直觉里的「radio0 是 2.4G」正好相反，所以这里一律按 band 字段查找。
+
+usage() {
+    cat <<'EOF'
+用法:
+  wifi-band               查看各频段当前状态
+  wifi-band 2.4 on|off    开关 2.4G
+  wifi-band 5 on|off      开关 5G
+  wifi-band all on|off    两个频段一起开关
+
+注意: 全部关闭后只能通过网线访问后台。
+EOF
+    exit 1
+}
+
+# 列出无线设备段名
+all_radios() {
+    uci -q show wireless 2>/dev/null \
+        | sed -n 's/^wireless\.\(radio[0-9]*\)\.band=.*/\1/p' \
+        | sort -u
+}
+
+# 按 band（2g/5g）列出对应的段名
+radios_of() {
+    for r in $(all_radios); do
+        [ "$(uci -q get wireless."$r".band)" = "$1" ] && echo "$r"
+    done
+}
+
+set_one() {
+    case "$2" in
+        on|1)   uci set wireless."$1".disabled='0' ;;
+        off|0)  uci set wireless."$1".disabled='1' ;;
+        *)      usage ;;
+    esac
+}
+
+# 取某个 radio 上绑定 AP 的 SSID
+ssid_for() {
+    for i in $(uci -q show wireless 2>/dev/null \
+            | sed -n 's/^wireless\.\([^.=]*\)\.device=.*/\1/p' | sort -u); do
+        [ "$(uci -q get wireless."$i".device)" = "$1" ] || continue
+        uci -q get wireless."$i".ssid
+        return
+    done
+}
+
+show_status() {
+    echo "  频段   radio    射频      SSID"
+    for r in $(all_radios); do
+        b=$(uci -q get wireless."$r".band)
+        d=$(uci -q get wireless."$r".disabled)
+        s=$(ssid_for "$r")
+        case "$b" in
+            2g) label='2.4G' ;;
+            5g) label='5G  ' ;;
+            *)  label="$b" ;;
+        esac
+        if [ "$d" = "1" ]; then st="已关闭"; else st="已开启"; fi
+        printf '  %-6s %-8s %-8s %s\n' "$label" "$r" "$st" "${s:-—}"
+    done
+}
+
+apply() {
+    uci commit wireless
+    wifi reload >/dev/null 2>&1
+    echo "已应用，无线重载约需 5~10 秒，期间连接会短暂中断。"
+}
+
+case "$1" in
+    ''|status)
+        show_status
+        ;;
+    all)
+        [ -z "$2" ] && usage
+        [ "$2" = "off" ] && echo "警告: 两个频段都关闭后，只能通过网线访问后台。"
+        for r in $(all_radios); do
+            set_one "$r" "$2"
+        done
+        apply
+        show_status
+        ;;
+    2.4|2g|24)
+        [ -z "$2" ] && usage
+        rs=$(radios_of 2g)
+        [ -z "$rs" ] && { echo "未找到 2.4G 射频"; exit 1; }
+        for r in $rs; do set_one "$r" "$2"; done
+        apply
+        show_status
+        ;;
+    5|5g|50)
+        [ -z "$2" ] && usage
+        rs=$(radios_of 5g)
+        [ -z "$rs" ] && { echo "未找到 5G 射频"; exit 1; }
+        for r in $rs; do set_one "$r" "$2"; done
+        apply
+        show_status
+        ;;
+    *)
+        usage
+        ;;
+esac
+
+exit 0

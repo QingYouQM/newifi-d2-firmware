@@ -1,0 +1,119 @@
+#!/bin/sh
+# ------------------------------------------------------------------
+# leigod-d2 —— 新路由3 (MT7621 / mipsel) 雷神加速器安装助手
+#
+# 背景: 官方安装脚本 install_binary 会把 9MB 的二进制 cp 一份成
+#       acc_upgrade_monitor，等于占 18MB。D2 的 overlay 只有 20MB 上下，
+#       本脚本在安装后把副本换成软链，回收约 9MB。
+#
+# 用法:
+#   leigod-d2 space     查看空间够不够
+#   leigod-d2 install   调用官方脚本安装
+#   leigod-d2 dedupe    仅回收升级副本占用的空间
+#   leigod-d2 status    查看安装状态
+# ------------------------------------------------------------------
+
+SBIN="/usr/sbin/leigod"
+BIN_NAME="acc-gw.router.mipsel"
+BASE_URL="http://119.3.40.126/router_plugin_new"
+
+overlay_free_mb() {
+    df -k /overlay 2>/dev/null | awk 'NR==2{print int($4/1024)}'
+}
+
+do_space() {
+    FREE=$(overlay_free_mb)
+    [ -z "$FREE" ] && FREE=$(df -k / | awk 'NR==2{print int($4/1024)}')
+    echo "overlay 可用空间: ${FREE} MB"
+    echo "雷神占用估算:    10 MB (二进制 + xdb)"
+    echo "                 18 MB (不做软链去重时)"
+    if [ "$FREE" -lt 12 ]; then
+        echo "结论: 偏紧。建议先做 extroot 扩容，或接受装完几乎没有余量。"
+    elif [ "$FREE" -lt 20 ]; then
+        echo "结论: 装得下，但需要执行 dedupe 回收副本空间。"
+    else
+        echo "结论: 空间充足。"
+    fi
+}
+
+do_dedupe() {
+    MON="$SBIN/acc_upgrade_monitor"
+    BIN="$SBIN/$BIN_NAME"
+    if [ ! -f "$BIN" ]; then
+        echo "未找到主程序 $BIN，请先完成安装"
+        return 1
+    fi
+    if [ -L "$MON" ]; then
+        echo "已是软链，无需处理"
+        return 0
+    fi
+    if [ -f "$MON" ]; then
+        rm -f "$MON"
+        ln -s "$BIN_NAME" "$MON"
+        echo "已用软链接替换升级副本，回收约 9 MB"
+    else
+        ln -s "$BIN_NAME" "$MON"
+        echo "升级副本缺失，已补上软链"
+    fi
+}
+
+do_install() {
+    if [ ! -f /etc/openwrt_release ]; then
+        echo "当前不是 OpenWrt 系固件，退出"
+        return 1
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "缺少 curl，无法继续"
+        return 1
+    fi
+
+    do_space
+
+    echo "--- 开始调用官方安装脚本 ---"
+    cd /tmp || return 1
+    if ! curl -fsSL "${BASE_URL}/plugin_install.sh" -o inst.sh; then
+        echo "下载安装脚本失败（网络不通？）"
+        return 1
+    fi
+
+    # 官方脚本内部用 return 而非 exit，顶层执行会报错但流程能走完，
+    # 所以这里不因为返回码非零就直接中止，改为检查产物。
+    sh inst.sh || true
+
+    if [ -f "$SBIN/$BIN_NAME" ]; then
+        echo "--- 主程序已就位，执行空间回收 ---"
+        do_dedupe
+        echo "--- 安装完成 ---"
+        echo "打开手机雷神加速器 App，连本机 WiFi 后即可识别插件"
+    else
+        echo "--- 安装失败：主程序未落地 ---"
+        echo "常见原因: overlay 空间不足 / 网络无法访问 ${BASE_URL}"
+        echo "可先执行: leigod-d2 space"
+        return 1
+    fi
+}
+
+do_status() {
+    if [ -f "$SBIN/$BIN_NAME" ]; then
+        echo "雷神主程序: 已安装 ($(du -h "$SBIN/$BIN_NAME" 2>/dev/null | awk '{print $1}'))"
+    else
+        echo "雷神主程序: 未安装"
+    fi
+    [ -L "$SBIN/acc_upgrade_monitor" ] && echo "升级副本  : 软链（已优化）"
+    [ -f "$SBIN/acc_upgrade_monitor" ] && [ ! -L "$SBIN/acc_upgrade_monitor" ] && \
+        echo "升级副本  : 实体文件（建议执行 leigod-d2 dedupe）"
+    [ -f /etc/config/accelerator ] && echo "配置文件  : /etc/config/accelerator 存在"
+    [ -f /etc/init.d/acc ] && echo "启动脚本  : /etc/init.d/acc 存在"
+    FREE=$(overlay_free_mb)
+    echo "剩余空间  : ${FREE} MB"
+}
+
+case "$1" in
+    space)   do_space ;;
+    dedupe)  do_dedupe ;;
+    status)  do_status ;;
+    install) do_install ;;
+    *)
+        echo "用法: leigod-d2 {space|install|dedupe|status}"
+        ;;
+esac
